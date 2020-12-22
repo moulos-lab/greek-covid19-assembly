@@ -98,7 +98,7 @@ From the results of FastQC, a lot of useful information may be revealed. Some ex
 
 In our case, we see points (1) and (5) above. Point (5) can be discarded due to very high coverage.
 
-![Image placeholder]()
+![Image placeholder](figures/hgt_genome_euro_748c_5739d0.png)
 
 Adapter and poor quality base trimming
 --------------------------------------
