@@ -821,3 +821,250 @@ rownames(alphabet)[which(alphabet[, "N"] > 100)]
 ## [13] "AL15_S68"  "C8-20_S83" "C8-3_S78"  "L14_S76"   "L24_S77"   "L25_S84"  
 ## [19] "L31_S79"   "L32_S80"
 ```
+
+## Troubleshooting gaps (Ns)
+
+Generally, the number and length of gaps in such small genomes such as the
+SARS-CoV-2 can be the results of several reasons. Some typical ones are:
+
+1. Non-uniform sequencing coverage across the viral genome
+2. Poor quality reads spanning the gap areas
+3. Problems in the capture kit design
+
+As we have demonstrated, using the initial samples without normalization results
+in poor quality assemblies. Another way of dealing with excessive gaps is to be
+more lenient during the normalization procedure, by allowing reads of less
+optimal depth to be part of normalized reads that are used for the assembly.
+This can be controlled through the `mindepth`, `minkmers` and `percentile`
+options of BBNorm. We are using these in the template script that will follow
+for guided *de novo* genome assembly.
+
+# Guided *de novo* genome assembly
+
+In the previous parts, we discussed how we can perform and basically assess
+*de novo* genome assembly of SARS-CoV-2. We also discussed how we can refine the
+process based on the existing reference genome. Now, we are going to make
+further use of the reference genome by providing it to SPAdes with the option
+`--trusted-contigs`. We are going to combine this procedure with the more 
+lenient normalization strategy discussed above. The following script template
+should complete the work. We assume 100x coverage.
+
+```{r code-14,eval=FALSE}
+#!/bin/bash
+
+HOME_PATH=/PATH/TO/ANALYSIS/DIRECTORY
+REFERENCE_PATH=$HOME_PATH/reference
+FASTQ_PATH=$HOME_PATH/fastq_qual
+ASSEMBLY_PATH=$HOME_PATH/assembly_trusted
+
+GENOME_INDEX=$REFERENCE_PATH/wuhCor1.fa
+
+BBNORM_COMMAND=/opt/ngstools/bbmap/bbnorm.sh
+SPADES_COMMAND=/opt/ngstools/spades/spades.py
+QUAST_COMMAND=/opt/ngstools/quast/quast.py
+
+CORES=16
+
+if [ ! -d $ASSEMBLY_PATH ]
+then
+    mkdir -p $ASSEMBLY_PATH
+fi
+
+for BASE in `ls $FASTQ_PATH`
+do
+    echo "Processing $BASE"
+    F1=$FASTQ_PATH/$BASE/$BASE"_R1.fastq"
+    F2=$FASTQ_PATH/$BASE/$BASE"_R2.fastq"
+    pigz -d $F1".gz" $F2".gz"
+    
+    for DP in 100
+    do
+        echo "Processing $DPx"
+        CURRENT_OUTPATH=$ASSEMBLY_PATH/$DP"x"/$BASE
+        mkdir -p $CURRENT_OUTPATH
+        
+        $BBNORM_COMMAND \
+            in=$F1 \
+            in2=$F2 \
+            out=$CURRENT_OUTPATH/$BASE"_R1.fastq" \
+            out2=$CURRENT_OUTPATH/$BASE"_R2.fastq" \
+            min=5 \
+            target=$DP \
+            fixspikes=t \
+            deterministic=t \
+            threads=$CORES \
+            mindepth=1 \
+            minkmers=2 \
+            percentile=30
+        
+        $SPADES_COMMAND \
+            -1 $CURRENT_OUTPATH/$BASE"_R1.fastq.gz" \
+            -2 $CURRENT_OUTPATH/$BASE"_R2.fastq.gz" \
+            -o $CURRENT_OUTPATH/spades \
+            --threads $CORES --careful \
+            --trusted-contigs $GENOME_INDEX
+        
+        $QUAST_COMMAND \
+            -r $GENOME_INDEX \
+            -o $CURRENT_OUTPATH/quast \
+            $CURRENT_OUTPATH/spades/scaffolds.fasta
+        
+        pigz $CURRENT_OUTPATH/$BASE"_R1.fastq" $CURRENT_OUTPATH/$BASE"_R2.fastq"
+    done
+    
+    pigz $F1 $F2
+done
+```
+
+Then, based on QUAST output we can again gather some assembly quality
+statistics:
+
+```{r code-15,eval=FALSE}
+#!/bin/bash
+
+HOME_PATH=/PATH/TO/ANALYSIS/DIRECTORY
+ASSEMBLY_PATH=$HOME_PATH/assembly_trusted
+
+STATS_OUT="files/stats_trusted.txt"
+
+printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "name" "number of contigs" \
+    "largest contig length" "GC (%)" "N50" "L50" "wuhCor1 match (%)" \
+     "coverage" > $STATS_OUT
+
+for X in `ls $ASSEMBLY_PATH`
+do
+    echo "Processing $X..."
+    for BASE in `ls $ASSEMBLY_PATH/$X`
+    do
+        echo "  Processing $BASE..."
+        
+        QUAST_REPORT=$ASSEMBLY_PATH/$X/$BASE/quast_greek/report.txt
+        
+        # names
+        printf "%s\t" $BASE >> $STATS_OUT
+            
+        # # contigs
+        printf "%d\t" `cat $QUAST_REPORT | head -16 | tail -1 | \
+            awk '{print $3}'` >> $STATS_OUT
+        
+        # length of largest contig
+        printf "%d\t" `cat $QUAST_REPORT | head -17 | tail -1 | \
+            awk '{print $3}'` >> $STATS_OUT
+        
+        # GC content
+        printf "%s\t" `cat $QUAST_REPORT | head -20 | tail -1 | \
+            awk '{print $3"%"}'` >> $STATS_OUT
+            
+        # N50
+        printf "%d\t" `cat $QUAST_REPORT | head -22 | tail -1 | \
+            awk '{print $2}'` >> $STATS_OUT
+        
+        # L50
+        printf "%d\t" `cat $QUAST_REPORT | head -26 | tail -1 | \
+            awk '{print $2}'` >> $STATS_OUT
+        
+        # wuhCor1 match (%)
+        printf "%s\t" `cat $QUAST_REPORT | head -39 | tail -1 | \
+            awk '{print $4"%"}'` >> $STATS_OUT
+        
+        # coverage x
+        printf "%s\n" $X >> $STATS_OUT
+    done
+done
+```
+
+The following table presents the gathered statistics:
+
+```{r tab-1,message=FALSE,warning=FALSE}
+library(kableExtra)
+
+tab <- read.delim("files/stats_trusted.txt",check.names=FALSE)
+
+kable(tab) %>%
+    kable_styling(bootstrap_options=c("striped","hover","condensed")) %>%
+    row_spec(4,bold=TRUE,color="white",background="#00B400") %>%
+    row_spec(83,bold=TRUE,color="white",background="#B40000")
+```
+
+By inspecting the summary statistics we can see that in almost all cases, the
+SARS-CoV-2 genome is captured by the aforementioned process and there is more
+than 99.9% match in most cases. There is one particular case, the sample
+`L40_S81`. Although the match with the reference is almost 100%, N50 is only
+15621. This suggests that there are 2 overlapping contigs spanning the whole
+viral genome and for some reason, the assembler was not able to merge them. 
+There is also the sample `14_S25` where we have two large contigs, but in this 
+case N50 is 29914 so the second contig should be an artifact.
+
+To verify our hypothesis about samples `L40_S81` and `14_S25`, we can align the
+contigs in the reference genome using BLAT on the UCSC Genome Browser website.
+We get the following results:
+
+![UCSC Genome Browser instance with the above samples and sequences loaded](figures/hgt_genome_euro_146ad_57b850_1.png)
+
+Indeed, `L40_S81` comprises two large contigs. We are going to try to merge the
+two contigs using MeDuSa:
+
+```{r code-16,eval=FALSE}
+HOME_PATH=/PATH/TO/ANALYSIS/DIRECTORY
+REFERENCE_PATH=$HOME_PATH/reference
+ASSEMBLY_PATH=$HOME_PATH/assembly_trusted
+
+cd $ASSEMBLY_PATH/100x/L40_S81/spades
+mkdir -p medusa_L40_S81/draft
+cp $REFERENCE_PATH/wuhCor1.fa ./medusa_L40_S81/draft/
+
+java -jar /PATH/TO/MEDUSA/medusa.jar \
+    -f ./medusa_L40_S81/draft \
+    -i ./scaffolds.fasta \
+    -o ./medusa_L40_S81/medusa.fasta \
+    -scriptPath /PATH/TO/MEDUSA/medusa_scripts/
+```
+
+Medusa will merge the two contigs but will add Ns. It will also produce a
+significantly larger genome as it will also try to merge some artifacts in the
+end of scaffolds file. This can be easily remedied manually by using BLAT 
+against the `wuhCor1` reference genome and the trim the additional sequence
+beyond the end of the polyA ending of the SARS-CoV-2 genome.
+
+Finally, we gather the final FASTA files, ready for any downstream analysis. We
+can use the `Biostrings` Bioconductor package to read, process and extract the
+largest contigs representing the assembly. We should not forget to replace the
+original `scaffolds.fasta` output of SPAdes with the one from MeDuSa (we backup
+the original file first):
+
+```{r code-17,eval=FALSE}
+HOME_PATH=/PATH/TO/ANALYSIS/DIRECTORY
+ASSEMBLY_PATH=$HOME_PATH/assembly_trusted
+
+cd $ASSEMBLY_PATH/100x/L40_S81/spades
+cp scaffolds.fasta scaffolds.fasta.bak
+cp ./medusa_L40_S81/medusa.fasta scaffolds.fasta
+```
+
+and then within R:
+
+```{r code-18,eval=FALSE}
+if (!requireNamespace("BiocManager",quietly=TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("Biostrings")
+
+HOME_PATH <- "/PATH/TO/ANALYSIS/DIRECTORY"
+ASSEMBLY_PATH <- file.path(HOME_PATH,"assembly_trusted","100x")
+FASTA_PATH <- file.path(HOME_PATH,"final_fasta")
+
+if (!dir.exists(FASTA_PATH))
+    dir.create(FASTA_PATH)
+
+setwd(ASSEMBLY_PATH)
+
+samples <- dir()
+for (s in samples) {
+    message("Reading ",s)
+    tmp <- readDNAStringSet(file.path(s,"spades","scaffolds.fasta"))
+    tmp <- tmp[1]
+    names(tmp) <- s
+    message("Writing ",s)
+    writeXStringSet(tmp,filepath=file.path(FASTA_PATH,paste0(s,".fasta")))
+}
+```
